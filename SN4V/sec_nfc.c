@@ -34,7 +34,9 @@
 #include <linux/gpio.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
+#include <linux/regmap.h>
 #include <linux/compat.h>
+#include <linux/of_platform.h>
 #include <asm/uaccess.h>
 #include <linux/clk-provider.h>
 #ifdef CONFIG_SEC_NFC_GPIO_CLK
@@ -87,6 +89,7 @@ struct sec_nfc_info {
     struct sec_nfc_platform_data *pdata;
     struct sec_nfc_i2c_info i2c_info;
     struct wakeup_source *nfc_wake_lock;
+    struct pmic_refout *sc27xx_refout;
 #ifdef CONFIG_SEC_NFC_GPIO_CLK
     bool clk_ctl;
     bool clk_state;
@@ -105,7 +108,34 @@ bool is_shutdown = false;
 enum sec_nfc_mode cur_mode;
 #endif
 
+static struct device_node *np = NULL;
+
 #define NFC_CLK_FREQ 26000000
+
+
+
+int pmic_refout_update(struct sec_nfc_info *info, unsigned int refout_num, int refout_state)
+{
+    int ret;
+    if (info->sc27xx_refout == NULL || refout_num >= info->sc27xx_refout->refnum) {
+        pr_err("%s- sc27xx_refout struct is invalid\n", __func__);
+        return -EINVAL;
+    }
+
+    if (!refout_state)
+        ret = regmap_update_bits(info->sc27xx_refout->regmap, info->sc27xx_refout->regsw,
+                 1 << refout_num, 0);
+    else if (refout_state == 1)
+        ret = regmap_update_bits(info->sc27xx_refout->regmap, info->sc27xx_refout->regsw,
+                 1 << refout_num, 1 << refout_num);
+    else {
+        pr_err("Invalid state(%d)\n", refout_state);
+        ret = -EINVAL;
+    }
+
+    return ret;
+}
+
 
 #ifdef CONFIG_SEC_NFC_IF_I2C
 static irqreturn_t sec_nfc_irq_thread_fn(int irq, void *dev_id)
@@ -389,7 +419,6 @@ static irqreturn_t sec_nfc_clk_irq_thread(int irq, void *dev_id)
     struct sec_nfc_info *info = dev_id;
     struct sec_nfc_platform_data *pdata = info->pdata;
     bool value;
-
     dev_dbg(info->dev, "[NFC]Clock Interrupt is occurred! %d \n",gpio_get_value(pdata->clk_req));
     value = gpio_get_value(pdata->clk_req) > 0 ? true : false;
     dev_dbg(info->dev, "[NFC] current value: %d, clk_state: %d\n", value, info->clk_state);
@@ -399,15 +428,24 @@ static irqreturn_t sec_nfc_clk_irq_thread(int irq, void *dev_id)
 
     if (value) {
         int ret = 0;
-        ret = clk_prepare_enable(pdata->clk_26m);
-        if(ret)
-            dev_err(info->dev, "clk clk_prepare_enable failed!\n");
-        ret = clk_prepare_enable(pdata->clk_enable);
-        if(ret)
-            dev_err(info->dev, "clk eb clk_prepare_enable failed!\n");
+        if (np) {
+            pmic_refout_update(info, 2, 1);
+        } else {
+            ret = clk_prepare_enable(pdata->clk_26m);
+            if(ret)
+                dev_err(info->dev, "clk clk_prepare_enable failed!\n");
+            ret = clk_prepare_enable(pdata->clk_enable);
+            if(ret)
+                dev_err(info->dev, "clk eb clk_prepare_enable failed!\n");
+        }
     } else {
-        clk_disable_unprepare(pdata->clk_26m);
-        clk_disable_unprepare(pdata->clk_enable);
+        if (np) {
+            pmic_refout_update(info, 2, 0);
+        } else {
+            clk_disable_unprepare(pdata->clk_26m);
+            clk_disable_unprepare(pdata->clk_enable);
+        }
+
     }
 
      info->clk_state = value;
@@ -455,8 +493,12 @@ void sec_nfc_clk_ctl_disable(struct sec_nfc_info *info)
 
     free_irq(irq, info);
     if (info->clk_state) {
-        clk_disable_unprepare(pdata->clk_26m);
-        clk_disable_unprepare(pdata->clk_enable);
+        if (np) {
+            pmic_refout_update(info, 2, 0);
+        } else {
+            clk_disable_unprepare(pdata->clk_26m);
+            clk_disable_unprepare(pdata->clk_enable);
+        }
     }
     info->clk_state = false;
     info->clk_ctl = false;
@@ -860,7 +902,6 @@ static int sec_nfc_parse_dt(struct device *dev,
                             struct sec_nfc_platform_data *pdata)
 {
     struct device_node *np = dev->of_node;
-
     pdata->ven = of_get_named_gpio(np, "sec-nfc,ven-gpio", 0);
     pdata->firm = of_get_named_gpio(np, "sec-nfc,firm-gpio", 0);
     pdata->wake = pdata->firm;
@@ -906,7 +947,9 @@ static int __sec_nfc_probe(struct device *dev)
 {
     struct sec_nfc_info *info;
     struct sec_nfc_platform_data *pdata = NULL;
+    struct platform_device *pmic_device;
     int ret = 0;
+    int reg_val;
 
     pr_info("%s : start\n", __func__);
     if (dev->of_node) {
@@ -943,6 +986,46 @@ static int __sec_nfc_probe(struct device *dev)
     info->miscdev.name = SEC_NFC_DRIVER_NAME;
     info->miscdev.fops = &sec_nfc_fops;
     info->miscdev.parent = dev;
+    np = of_find_compatible_node(NULL, NULL, "sprd,sc27xx-refout");
+    if (!np) {
+        pr_err("%s-can't find refout node.\n", __func__);
+    } else {
+        pr_info("%s- enter refout init.\n", __func__);
+
+        info->sc27xx_refout = kzalloc(sizeof(struct pmic_refout), GFP_KERNEL);
+        if (!info->sc27xx_refout) {
+            pr_err("%s- can't alloc memory for pmic refout", __func__);
+            return -ENOMEM;
+        }
+
+        ret = of_property_read_u32_index(np, "regsw", 0, &info->sc27xx_refout->regsw);
+        if (ret) {
+            pr_err("Get base register failed\n");
+            return -EINVAL;
+        }
+
+        ret = of_property_read_u32_index(np, "refnum", 0, &info->sc27xx_refout->refnum);
+        if (ret) {
+            pr_err("Get refout num failed\n");
+            return -EINVAL;
+        }
+        pmic_device = of_find_device_by_node(np);
+        if(!pmic_device) {
+            of_node_put(np);
+            pr_err("%s- find refout node fail.\n", __func__);
+            return -ENODEV;
+        }
+        of_node_put(np);
+        info->sc27xx_refout->regmap = dev_get_regmap(pmic_device->dev.parent, NULL);
+        if (!info->sc27xx_refout->regmap) {
+            put_device(&pmic_device->dev);
+            pr_err("%s- cant't get pmic regmap device\n", __func__);
+            return -ENODEV;
+        }
+        put_device(&pmic_device->dev);
+        reg_val = regmap_read(info->sc27xx_refout->regmap, info->sc27xx_refout->regsw, &reg_val);
+        pr_info("%s- reg_val value is = %d, refout addr is:%x.", __func__, reg_val, &info->sc27xx_refout);
+    }
     ret = misc_register(&info->miscdev);
     if (ret < 0) {
         dev_err(dev, "failed to register Device\n");
@@ -1004,23 +1087,26 @@ static int __sec_nfc_probe(struct device *dev)
         }
         gpio_direction_input(pdata->clk_req);
     }
-    pdata->clk_26m = devm_clk_get(dev, "nfc_clk");
-    if (IS_ERR(pdata->clk_26m)) {
-        pr_err("can't get nfc clock dts config: clk_26m\n");
-        return -1;
+    if (!np) {
+        pdata->clk_26m = devm_clk_get(dev, "nfc_clk");
+        if (IS_ERR(pdata->clk_26m)) {
+            pr_err("can't get nfc clock dts config: clk_26m\n");
+            return -1;
+        }
+        pdata->clk_parent = devm_clk_get(dev, "source");
+        if (IS_ERR(pdata->clk_parent)) {
+            pr_err("can't get nfc clock dts config: source\n");
+            return -1;
+        }
+        clk_set_parent(pdata->clk_26m, pdata->clk_parent);
+        pdata->clk_enable = devm_clk_get(dev, "enable");
+        if (IS_ERR(pdata->clk_enable)) {
+            pr_err("can't get nfc clock dts config: enable\n");
+            return -1;
+        }
+        clk_set_rate(pdata->clk_26m, NFC_CLK_FREQ);
     }
-    pdata->clk_parent = devm_clk_get(dev, "source");
-    if (IS_ERR(pdata->clk_parent)) {
-        pr_err("can't get nfc clock dts config: source\n");
-        return -1;
-    }
-    clk_set_parent(pdata->clk_26m, pdata->clk_parent);
-    pdata->clk_enable = devm_clk_get(dev, "enable");
-    if (IS_ERR(pdata->clk_enable)) {
-        pr_err("can't get nfc clock dts config: enable\n");
-        return -1;
-    }
-    clk_set_rate(pdata->clk_26m, NFC_CLK_FREQ);
+
 #ifdef CONFIG_SEC_ESE_COLDRESET
     init_coldreset_mutex();
     init_sleep_wake_mutex();
@@ -1066,10 +1152,12 @@ static int __sec_nfc_remove(struct device *dev)
 
     dev_dbg(info->dev, "%s\n", __func__);
 
-#ifdef CONFIG_SEC_NFC_GPIO_CLK
+    if (np) {
+        pmic_refout_update(info, 2, 0);
+    } else {
         clk_disable_unprepare(pdata->clk_26m);
-	clk_disable_unprepare(pdata->clk_enable);
-#endif
+        clk_disable_unprepare(pdata->clk_enable);
+    }
 
     misc_deregister(&info->miscdev);
     sec_nfc_set_mode(info, SEC_NFC_MODE_OFF);

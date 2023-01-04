@@ -68,6 +68,16 @@
 #define SEC_NFC_VEN_WAIT_TIME   (20)
 #endif
 
+/*pmic refout struct*/
+#define SEC_NFC_CLOCK_AP 1
+#define SEC_NFC_CLOCK_PMIC 2
+
+struct pmic_refout {
+    unsigned int regsw;
+    unsigned int refnum;
+    struct regmap *regmap;
+};
+
 /* gpio pin configuration */
 struct sec_nfc_platform_data {
     int irq;

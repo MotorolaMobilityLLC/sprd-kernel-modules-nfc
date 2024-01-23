@@ -6,6 +6,10 @@
  * Copyright (C) 2010 Trusted Logic S.A.
  */
 
+ //ST54K7ATENL9CQL2
+static char nfcchip_hwinfo[32] = "unknown";
+
+
 #define ST21NFC_MAGIC 0xEA
 
 #define ST21NFC_NAME "st21nfc"

@@ -175,6 +175,8 @@ struct st21nfc_device {
 	unsigned int polarity_mode;
 };
 
+char* stnfc_hwinfo = nfcchip_hwinfo;
+
 #ifndef PMIC_DRIVER
 static struct device_node *np = NULL;
 int pmic_refout_update(struct st21nfc_device *info, unsigned int refout_num, int refout_state)
@@ -1498,6 +1500,8 @@ static int st21nfc_probe(struct i2c_client *client,
 	st21nfc_dev->irq_wakeup_source = wakeup_source_register(NULL, "st21nfc");
 	st21nfc_dev->irq_wake_up = false;
 
+	strcpy(nfcchip_hwinfo, "ST54K");
+
 	return 0;
 
 err_sysfs_create_group_failed:
@@ -1636,6 +1640,7 @@ static struct i2c_driver st21nfc_driver = {
 		},
 };
 
+module_param(stnfc_hwinfo, charp, 0444);//make hwinfo node for st54k
 
 #ifdef GKI_MODULE
 module_i2c_driver(st21nfc_driver);

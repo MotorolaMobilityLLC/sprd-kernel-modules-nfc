@@ -176,7 +176,17 @@ struct st21nfc_device {
 };
 
 char* stnfc_hwinfo = nfcchip_hwinfo;
+void set_hwinfo(void) {
+	static struct device_node *node = NULL;
+	const char *sku_value;
+	if (!node)
+		node = of_find_node_by_path("/firmware/android");
+	if (node)
+		of_property_read_string(node, "hwinfo.sku_id_real", &sku_value);
+	pr_info("%s : sku_value = %s",__func__,sku_value);
+	strcpy(nfcchip_hwinfo, (strcmp(sku_value,"7")==0)? "ST21N" : "ST54K");
 
+}
 #ifndef PMIC_DRIVER
 static struct device_node *np = NULL;
 int pmic_refout_update(struct st21nfc_device *info, unsigned int refout_num, int refout_state)
@@ -1499,8 +1509,7 @@ static int st21nfc_probe(struct i2c_client *client,
 	}
 	st21nfc_dev->irq_wakeup_source = wakeup_source_register(NULL, "st21nfc");
 	st21nfc_dev->irq_wake_up = false;
-
-	strcpy(nfcchip_hwinfo, "ST54K");
+	set_hwinfo();
 
 	return 0;
 
